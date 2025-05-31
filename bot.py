@@ -6,14 +6,14 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 
-API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"  # Ваш токен
-ADMIN_ID = 1303484682  # Ваш Telegram ID
+API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
+ADMIN_ID = 1303484682
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
 # Подключаем SQLite
-conn = sqlite3.connect("subscriptions.db")
+conn = sqlite3.connect("subscriptions.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
-# 👋 Приветственное сообщение
+# Приветственное сообщение
 WELCOME_MSG = (
     "👋 Приветствуем в нашем боте!\n\n"
     "🔐 Здесь вы получите доступ к эксклюзивным прогнозам и аналитике.\n"
@@ -43,7 +43,7 @@ def user_kb():
     kb.add("🔍 Проверить подписку")
     return kb
 
-# Добавить пользователя
+# Добавить нового пользователя
 def add_user(user: types.User):
     cursor.execute("SELECT user_id FROM subscriptions WHERE user_id = ?", (user.id,))
     if not cursor.fetchone():
@@ -54,7 +54,7 @@ def add_user(user: types.User):
         )
         conn.commit()
 
-# Автоудаление просроченных подписок
+# Удаление просроченных подписок (раз в час)
 async def clean_expired():
     while True:
         now = datetime.now().isoformat()
@@ -62,7 +62,7 @@ async def clean_expired():
         conn.commit()
         await asyncio.sleep(3600)
 
-# Обработчик сообщений от админа
+# Админ команды
 @dp.message_handler(lambda m: m.from_user.id == ADMIN_ID)
 async def admin_handler(message: types.Message):
     if message.text == "/start":
@@ -93,16 +93,15 @@ async def admin_handler(message: types.Message):
                 return
             user_id = row[0]
             end_date = datetime.now() + timedelta(days=days)
-            cursor.execute("REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
-                           (user_id, username, end_date.isoformat()))
+            cursor.execute("UPDATE subscriptions SET end_date = ? WHERE user_id = ?", (end_date.isoformat(), user_id))
             conn.commit()
             await message.answer(f"✅ Подписка выдана пользователю {username} на {days} дней.", reply_markup=admin_kb())
             try:
                 await bot.send_message(user_id, f"🎉 Ваша подписка активирована на {days} дней. Добро пожаловать!")
             except:
-                pass
+                await message.answer("❗ Не удалось отправить сообщение пользователю.")
         except Exception as e:
-            await message.answer(f"Ошибка: {e}", reply_markup=admin_kb())
+            await message.answer(f"❌ Ошибка: {e}", reply_markup=admin_kb())
 
     else:
         # Рассылка
@@ -110,15 +109,15 @@ async def admin_handler(message: types.Message):
         rows = cursor.fetchall()
         sent = 0
         for uid, end_date in rows:
-            if datetime.fromisoformat(end_date) > datetime.now():
-                try:
+            try:
+                if datetime.fromisoformat(end_date) > datetime.now():
                     await bot.send_message(uid, message.text)
                     sent += 1
-                except:
-                    pass
+            except:
+                continue
         await message.answer(f"📨 Сообщение отправлено {sent} пользователям.", reply_markup=admin_kb())
 
-# Обработчик пользователей
+# Пользовательские команды
 @dp.message_handler(lambda m: m.from_user.id != ADMIN_ID)
 async def user_handler(message: types.Message):
     add_user(message.from_user)
@@ -146,4 +145,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.get_event_loop()
     loop.create_task(clean_expired())
-    executor.start_polling(dp, skip_updates=True)
+    try:
+        executor.start_polling(dp, skip_updates=True)
+    finally:
+        conn.close()
