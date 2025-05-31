@@ -6,12 +6,13 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 
-API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
-ADMIN_ID = 1303484682
+API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"  # Твой токен
+ADMIN_ID = 1303484682  # Твой Telegram ID
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
+# Подключаем SQLite для хранения подписок
 conn = sqlite3.connect("subscriptions.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -23,13 +24,16 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
+# Проверка подписки
 def is_subscribed(user_id):
     cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
     result = cursor.fetchone()
     if not result:
         return False
-    return datetime.now() < datetime.fromisoformat(result[0])
+    end_date = datetime.fromisoformat(result[0])
+    return datetime.now() < end_date
 
+# Автоудаление просроченных подписок
 async def clean_expired():
     while True:
         now = datetime.now().isoformat()
@@ -37,6 +41,7 @@ async def clean_expired():
         conn.commit()
         await asyncio.sleep(3600)
 
+# Кнопочная админка
 @dp.message_handler(commands=["start"])
 async def start_cmd(message: types.Message):
     if message.from_user.id == ADMIN_ID:
@@ -44,7 +49,7 @@ async def start_cmd(message: types.Message):
         kb.add(
             KeyboardButton("📊 Статистика"),
             KeyboardButton("📢 Рассылка"),
-            KeyboardButton("✅ Выдать подписку")
+            KeyboardButton("➕ Выдать подписку")
         )
         await message.answer("Добро пожаловать в админ-панель!", reply_markup=kb)
     else:
@@ -53,7 +58,8 @@ async def start_cmd(message: types.Message):
         else:
             await message.answer("Привет! Подписка не активна. Свяжитесь с @intonusmd для оплаты.")
 
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📊 Статистика")
+# Статистика
+@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID and m.text == "📊 Статистика")
 async def stats(message: types.Message):
     cursor.execute("SELECT COUNT(*) FROM subscriptions")
     total = cursor.fetchone()[0]
@@ -61,64 +67,58 @@ async def stats(message: types.Message):
     active = cursor.fetchone()[0]
     await message.answer(f"Всего пользователей: {total}\nАктивных подписок: {active}")
 
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📢 Рассылка")
+# Рассылка
+broadcast_wait = {}
+
+@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID and m.text == "📢 Рассылка")
 async def prompt_broadcast(message: types.Message):
-    await message.answer("Отправь сообщение для рассылки (оно будет разослано всем с активной подпиской).")
+    broadcast_wait[message.from_user.id] = True
+    await message.answer("Отправьте сообщение для рассылки.")
 
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "✅ Выдать подписку")
-async def ask_for_username(message: types.Message):
-    await message.answer("Напиши username пользователя (например, @user) и количество дней через пробел.\nПример: `@user 30`", parse_mode="Markdown")
+# Выдать подписку — запрос username
+@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID and m.text == "➕ Выдать подписку")
+async def ask_username(message: types.Message):
+    await message.answer("Отправь username пользователя (начиная с @) и количество дней. Пример:\n`@username 30`", parse_mode="Markdown")
 
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text.startswith("@"))
-async def give_subscription_by_username(message: types.Message):
-    try:
-        username, days = message.text.strip().split()
-        days = int(days)
-        user = await find_user_by_username(username[1:])  # удаляем @
-        if not user:
-            await message.answer("Пользователь с таким username ещё не использовал бота.")
-            return
-        end_date = datetime.now() + timedelta(days=days)
-        cursor.execute(
-            "REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
-            (user["id"], user["username"], end_date.isoformat())
-        )
-        conn.commit()
-        await message.answer(f"Подписка для {username} выдана на {days} дней.")
-        await bot.send_message(user["id"], f"Ваша подписка активирована на {days} дней. Добро пожаловать!")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
-
-user_cache = {}
-
-@dp.message_handler()
-async def cache_user(message: types.Message):
-    user_cache[message.from_user.username] = {
-        "id": message.from_user.id,
-        "username": message.from_user.username
-    }
-    if is_subscribed(message.from_user.id):
-        await message.answer("У вас активная подписка ✅")
-    else:
-        await message.answer("Подписка не активна. Свяжитесь с @intonusmd")
-
-async def find_user_by_username(username):
-    return user_cache.get(username)
-
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and not message.text.startswith("/"))
-async def handle_broadcast_text(message: types.Message):
+# Принимаем рассылку или выдаем подписку
+@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID)
+async def handle_admin_text(message: types.Message):
     text = message.text.strip()
-    cursor.execute("SELECT user_id, end_date FROM subscriptions")
-    users = cursor.fetchall()
-    count = 0
-    for user_id, end_date in users:
-        if datetime.now() < datetime.fromisoformat(end_date):
-            try:
-                await bot.send_message(user_id, text)
-                count += 1
-            except:
-                pass
-    await message.answer(f"Сообщение отправлено {count} пользователям.")
+
+    # Режим рассылки
+    if broadcast_wait.get(message.from_user.id):
+        cursor.execute("SELECT user_id, end_date FROM subscriptions")
+        users = cursor.fetchall()
+        count = 0
+        for user_id, end_date in users:
+            if datetime.now() < datetime.fromisoformat(end_date):
+                try:
+                    await bot.send_message(user_id, text)
+                    count += 1
+                except:
+                    pass
+        await message.answer(f"Сообщение отправлено {count} пользователям.")
+        broadcast_wait[message.from_user.id] = False
+        return
+
+    # Выдача подписки по username
+    if text.startswith("@") and len(text.split()) == 2:
+        username, days_str = text.split()
+        try:
+            days = int(days_str)
+            user = await bot.get_chat(username)
+            end_date = datetime.now() + timedelta(days=days)
+            cursor.execute(
+                "REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
+                (user.id, username, end_date.isoformat())
+            )
+            conn.commit()
+            await message.answer(f"Подписка пользователю {username} выдана на {days} дней.")
+            await bot.send_message(user.id, "Ваша подписка активирована. Добро пожаловать!")
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
+    else:
+        await message.answer("Пожалуйста, введите username и количество дней. Пример:\n`@username 30`", parse_mode="Markdown")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
