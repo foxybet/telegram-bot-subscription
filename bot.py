@@ -12,7 +12,6 @@ ADMIN_ID = 1303484682  # Твой админ ID
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Подключаем SQLite для хранения подписок
 conn = sqlite3.connect("subscriptions.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -23,7 +22,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
-# Проверка подписки
 def is_subscribed(user_id):
     cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
     result = cursor.fetchone()
@@ -32,7 +30,6 @@ def is_subscribed(user_id):
     end_date = datetime.fromisoformat(result[0])
     return datetime.now() < end_date
 
-# Автоудаление просроченных подписок (раз в час)
 async def clean_expired():
     while True:
         now = datetime.now().isoformat()
@@ -40,20 +37,20 @@ async def clean_expired():
         conn.commit()
         await asyncio.sleep(3600)
 
-# Команда /start
 @dp.message_handler(commands=["start"])
 async def start_cmd(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        print(f"[INFO] Админ {message.from_user.id} вошёл в админ-панель")
+        kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
         kb.add(KeyboardButton("📊 Статистика"), KeyboardButton("📢 Рассылка"))
         await message.answer("Добро пожаловать в админ-панель!", reply_markup=kb)
     else:
+        print(f"[INFO] Пользователь {message.from_user.id} запустил бота")
         if is_subscribed(message.from_user.id):
             await message.answer("Добро пожаловать! У вас активна подписка ✅")
         else:
             await message.answer("Привет! Подписка не активна. Свяжитесь с @intonusmd для оплаты.")
 
-# Команда для выдачи подписки (только для админа)
 @dp.message_handler(commands=["confirm"])
 async def confirm_cmd(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -70,12 +67,10 @@ async def confirm_cmd(message: types.Message):
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
-# Обработка кнопки "Рассылка" для админа
 @dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📢 Рассылка")
 async def prompt_broadcast(message: types.Message):
     await message.answer("Отправь сообщение для рассылки (оно будет разослано всем с активной подпиской).")
 
-# Обработка кнопки "Статистика" для админа
 @dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📊 Статистика")
 async def stats(message: types.Message):
     cursor.execute("SELECT COUNT(*) FROM subscriptions")
@@ -84,7 +79,6 @@ async def stats(message: types.Message):
     active = cursor.fetchone()[0]
     await message.answer(f"Всего пользователей: {total}\nАктивных подписок: {active}")
 
-# Получаем текст для рассылки и отправляем всем активным
 @dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and not message.text.startswith("/"))
 async def handle_broadcast_text(message: types.Message):
     text = message.text.strip()
@@ -99,6 +93,12 @@ async def handle_broadcast_text(message: types.Message):
             except:
                 pass
     await message.answer(f"Сообщение отправлено {count} пользователям.")
+
+@dp.message_handler(commands=["keyboard"])
+async def keyboard_test(message: types.Message):
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    kb.add(KeyboardButton("📊 Статистика"), KeyboardButton("📢 Рассылка"))
+    await message.answer("Тест клавиатуры:", reply_markup=kb)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
