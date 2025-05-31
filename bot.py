@@ -7,7 +7,7 @@ from aiogram.utils import executor
 from datetime import datetime, timedelta
 
 API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
-ADMIN_ID = 1303484682
+ADMIN_ID = 1303484682  # Замените на свой Telegram ID
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
@@ -131,8 +131,13 @@ async def user_handler(message: types.Message):
             end_date = datetime.fromisoformat(result[0])
             now = datetime.now()
             if end_date > now:
-                days_remaining = (end_date - now).days
-                await message.answer(f"✅ Ваша подписка активна.\nОсталось дней: {days_remaining}", reply_markup=user_kb())
+                delta = end_date - now
+                days = delta.days
+                hours = delta.seconds // 3600
+                await message.answer(
+                    f"✅ Ваша подписка активна.\nОсталось: {days} дней и {hours} часов.",
+                    reply_markup=user_kb()
+                )
             else:
                 await message.answer("🔒 У вас нет активной подписки. Свяжитесь с @intonusmd для оплаты.", reply_markup=user_kb())
         else:
