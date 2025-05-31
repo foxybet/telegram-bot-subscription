@@ -8,4 +8,4 @@ app = "telegram-bot-subscription"
   PORT = "8080"
 
 [processes]
-  app = "python main.py"
+  app = "python bot.py"
