@@ -6,8 +6,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 
-API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"  # Твой токен
-ADMIN_ID = 1303484682  # Твой админ ID
+API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
+ADMIN_ID = 1303484682
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
+# Добавляем пользователя в базу если его там нет
 def add_user(user: types.User):
     user_id = user.id
     username = f"@{user.username}" if user.username else None
@@ -35,6 +36,7 @@ def add_user(user: types.User):
         )
         conn.commit()
 
+# Проверка подписки
 def is_subscribed(user_id):
     cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
     result = cursor.fetchone()
@@ -43,15 +45,17 @@ def is_subscribed(user_id):
     end_date = datetime.fromisoformat(result[0])
     return datetime.now() < end_date
 
-def get_subscription_remaining_days(user_id):
+# Проверка сколько дней осталось
+def days_left(user_id):
     cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
     result = cursor.fetchone()
     if not result:
         return 0
     end_date = datetime.fromisoformat(result[0])
-    delta = end_date - datetime.now()
-    return max(delta.days, 0)
+    remaining = (end_date - datetime.now()).days
+    return remaining if remaining > 0 else 0
 
+# Автоудаление просроченных подписок (раз в час)
 async def clean_expired():
     while True:
         now = datetime.now().isoformat()
@@ -59,108 +63,106 @@ async def clean_expired():
         conn.commit()
         await asyncio.sleep(3600)
 
-kb_user = ReplyKeyboardMarkup(resize_keyboard=True)
-kb_user.add(KeyboardButton("🔍 Проверить подписку"))
+# Клавиатура для админа
+def admin_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(
+        KeyboardButton("📊 Статистика"),
+        KeyboardButton("📢 Рассылка"),
+        KeyboardButton("➕ Выдать подписку")
+    )
+    return kb
 
-kb_admin = ReplyKeyboardMarkup(resize_keyboard=True)
-kb_admin.add(
-    KeyboardButton("📊 Статистика"),
-    KeyboardButton("📢 Рассылка"),
-    KeyboardButton("➕ Выдать подписку")
+# Клавиатура для пользователя
+def user_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("🔍 Проверить подписку"))
+    return kb
+
+# Приветственное сообщение
+WELCOME_MSG = (
+    "👋 Приветствую!\n\n"
+    "Добро пожаловать в бот подписок.\n\n"
+    "👉 Для получения подписки свяжитесь с @intonusmd.\n"
+    "👉 Если у вас уже есть подписка, нажмите кнопку ниже, чтобы проверить её статус."
 )
 
 @dp.message_handler(commands=["start"])
 async def start_cmd(message: types.Message):
     add_user(message.from_user)
-    user_id = message.from_user.id
-    if user_id == ADMIN_ID:
-        text_admin = (
-            "👋 Приветствую, администратор!\n\n"
-            "Здесь вы можете управлять подписками и рассылками.\n"
-            "Используйте меню ниже для работы с ботом."
-        )
-        await message.answer(text_admin, reply_markup=kb_admin)
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Добро пожаловать, админ!", reply_markup=admin_kb())
     else:
-        text_user = (
-            "✨ Добро пожаловать в наш бот!\n\n"
-            "Здесь вы можете проверить статус вашей подписки и получать полезные уведомления.\n"
-            "Нажмите кнопку ниже, чтобы узнать состояние вашей подписки."
-        )
-        await message.answer(text_user, reply_markup=kb_user)
+        await message.answer(WELCOME_MSG, reply_markup=user_kb())
 
-@dp.message_handler()
-async def handle_messages(message: types.Message):
+@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID)
+async def admin_handler(message: types.Message):
     add_user(message.from_user)
-    user_id = message.from_user.id
-    text = message.text
+    text = message.text.strip()
 
-    if user_id == ADMIN_ID:
-        if text == "📊 Статистика":
-            cursor.execute("SELECT COUNT(*) FROM subscriptions")
-            total = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE end_date > ?", (datetime.now().isoformat(),))
-            active = cursor.fetchone()[0]
-            await message.answer(f"Всего пользователей: {total}\nАктивных подписок: {active}", reply_markup=kb_admin)
+    if text == "📊 Статистика":
+        cursor.execute("SELECT COUNT(*) FROM subscriptions")
+        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE end_date > ?", (datetime.now().isoformat(),))
+        active = cursor.fetchone()[0]
+        await message.answer(f"📈 Статистика:\n\nВсего пользователей: {total}\nАктивных подписок: {active}", reply_markup=admin_kb())
 
-        elif text == "📢 Рассылка":
-            await message.answer("Отправь сообщение для рассылки (оно будет разослано всем с активной подпиской).", reply_markup=kb_admin)
-            @dp.message_handler(lambda m: m.from_user.id == ADMIN_ID)
-            async def broadcast(msg: types.Message):
-                text = msg.text.strip()
-                cursor.execute("SELECT user_id, end_date FROM subscriptions")
-                users = cursor.fetchall()
-                count = 0
-                for uid, end_date in users:
-                    if datetime.now() < datetime.fromisoformat(end_date):
-                        try:
-                            await bot.send_message(uid, text)
-                            count += 1
-                        except:
-                            pass
-                await msg.answer(f"Сообщение отправлено {count} пользователям.", reply_markup=kb_admin)
-                dp.message_handlers.unregister(broadcast)
+    elif text == "📢 Рассылка":
+        await message.answer("Отправьте сообщение для рассылки всем активным подписчикам.", reply_markup=admin_kb())
+        dp.register_message_handler(broadcast_handler, lambda m: m.from_user.id == ADMIN_ID, state=None)
 
-        elif text == "➕ Выдать подписку":
-            await message.answer("Введите username пользователя (начинается с @) и количество дней подписки через пробел.\nПример:\n@username 30", reply_markup=kb_admin)
+    elif text == "➕ Выдать подписку":
+        await message.answer("Введите username пользователя и количество дней подписки через пробел.\nПример:\n@username 30", reply_markup=admin_kb())
 
-        elif text.startswith("@"):
+    elif text.startswith("@"):
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await message.answer("Ошибка! Формат: @username количество_дней", reply_markup=admin_kb())
+            return
+        username, days_str = parts
+        days = int(days_str)
+        cursor.execute("SELECT user_id FROM subscriptions WHERE username = ?", (username,))
+        res = cursor.fetchone()
+        if not res:
+            await message.answer(f"Пользователь {username} не найден.", reply_markup=admin_kb())
+            return
+        user_id_to_sub = res[0]
+        end_date = datetime.now() + timedelta(days=days)
+        cursor.execute("REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
+                       (user_id_to_sub, username, end_date.isoformat()))
+        conn.commit()
+        await message.answer(f"Подписка выдана пользователю {username} на {days} дней.", reply_markup=admin_kb())
+        try:
+            await bot.send_message(user_id_to_sub, f"Ваша подписка активирована на {days} дней. Добро пожаловать!")
+        except:
+            pass
+
+async def broadcast_handler(message: types.Message):
+    text = message.text.strip()
+    cursor.execute("SELECT user_id, end_date FROM subscriptions")
+    users = cursor.fetchall()
+    count = 0
+    for user_id, end_date in users:
+        if datetime.now() < datetime.fromisoformat(end_date):
             try:
-                parts = text.strip().split()
-                if len(parts) != 2:
-                    await message.answer("Ошибка! Введите в формате: @username количество_дней", reply_markup=kb_admin)
-                    return
-                username = parts[0]
-                days = int(parts[1])
+                await bot.send_message(user_id, text)
+                count += 1
+            except:
+                pass
+    await message.answer(f"Сообщение отправлено {count} пользователям.", reply_markup=admin_kb())
+    dp.message_handlers.unregister(broadcast_handler)  # отменяем регистрацию после рассылки
 
-                cursor.execute("SELECT user_id FROM subscriptions WHERE username = ?", (username,))
-                res = cursor.fetchone()
-                if not res:
-                    await message.answer(f"Пользователь {username} не найден.", reply_markup=kb_admin)
-                    return
-
-                user_id_to_sub = res[0]
-                end_date = datetime.now() + timedelta(days=days)
-                cursor.execute("REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
-                               (user_id_to_sub, username, end_date.isoformat()))
-                conn.commit()
-                await message.answer(f"Подписка выдана пользователю {username} на {days} дней.", reply_markup=kb_admin)
-                try:
-                    await bot.send_message(user_id_to_sub, f"Ваша подписка активирована на {days} дней. Добро пожаловать!")
-                except:
-                    pass
-            except Exception as e:
-                await message.answer(f"Ошибка: {e}", reply_markup=kb_admin)
-
+@dp.message_handler(lambda m: m.from_user.id != ADMIN_ID)
+async def user_handler(message: types.Message):
+    add_user(message.from_user)
+    if message.text == "🔍 Проверить подписку":
+        if is_subscribed(message.from_user.id):
+            days_remaining = days_left(message.from_user.id)
+            await message.answer(f"✅ Ваша подписка активна.\nОсталось дней: {days_remaining}", reply_markup=user_kb())
         else:
-            await message.answer("Команда не распознана.", reply_markup=kb_admin)
-
+            await message.answer("🔒 У вас нет активной подписки. Свяжитесь с @intonusmd для оплаты.", reply_markup=user_kb())
     else:
-        if text == "🔍 Проверить подписку":
-            days_left = get_subscription_remaining_days(user_id)
-            if days_left > 0:
-                await message.answer(f"⏳ Ваша подписка активна ещё {days_left} дней.", reply_markup=kb_user)
-            else:
-                await message.answer("🔒 У вас нет активной подписки. Свяжитесь с @intonusmd", reply_markup=kb_user)
+        await message.answer(WELCOME_MSG, reply_markup=user_kb())
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
