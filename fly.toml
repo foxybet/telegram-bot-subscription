@@ -1,23 +1,11 @@
-app = "telegram-subscription-bot"
-primary_region = "ams"
+
+app = "telegram-bot-subscription"
 
 [build]
-  image = "python:3.11"
+  builder = "paketobuildpacks/builder:base"
 
 [env]
-  PYTHONUNBUFFERED = "1"
+  PORT = "8080"
 
-[experimental]
-  auto_rollback = true
-
-[[services]]
-  internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    handlers = ["http"]
-    port = 80
-
-  [[services.ports]]
-    handlers = ["tls", "http"]
-    port = 443
+[processes]
+  app = "python main.py"
