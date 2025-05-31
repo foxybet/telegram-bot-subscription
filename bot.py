@@ -6,13 +6,13 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 
-API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"  # Твой токен
-ADMIN_ID = 1303484682  # Твой админ ID
+API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
+ADMIN_ID = 1303484682
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Подключаем SQLite для хранения подписок
+# Инициализация базы данных
 conn = sqlite3.connect("subscriptions.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
-# Добавляем пользователя в базу если его там нет
+# Добавление пользователя в базу
 def add_user(user: types.User):
     user_id = user.id
     username = f"@{user.username}" if user.username else None
@@ -45,88 +45,116 @@ def is_subscribed(user_id):
     end_date = datetime.fromisoformat(result[0])
     return datetime.now() < end_date
 
-# Автоудаление просроченных подписок (раз в час)
+# Сколько дней осталось
+def get_remaining_days(user_id):
+    cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if not result:
+        return 0
+    end_date = datetime.fromisoformat(result[0])
+    remaining = (end_date - datetime.now()).days
+    return max(remaining, 0)
+
+# Удаление просроченных подписок
 async def clean_expired():
     while True:
-        now = datetime.now().isoformat()
-        cursor.execute("DELETE FROM subscriptions WHERE end_date < ?", (now,))
-        conn.commit()
+        try:
+            conn_local = sqlite3.connect("subscriptions.db")
+            cursor_local = conn_local.cursor()
+            now = datetime.now().isoformat()
+            cursor_local.execute("DELETE FROM subscriptions WHERE end_date < ?", (now,))
+            conn_local.commit()
+            conn_local.close()
+        except Exception as e:
+            logging.error(f"Ошибка при удалении просроченных подписок: {e}")
         await asyncio.sleep(3600)
 
-# Добавляем пользователя при любом сообщении
+# Обработка сообщений
 @dp.message_handler()
 async def handle_all_messages(message: types.Message):
-    add_user(message.from_user)
+    user = message.from_user
+    user_id = user.id
+    add_user(user)
 
-    user_id = message.from_user.id
     if user_id == ADMIN_ID:
-        # Админка
+        # Меню админа
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(
             KeyboardButton("📊 Статистика"),
             KeyboardButton("📢 Рассылка"),
             KeyboardButton("➕ Выдать подписку")
         )
+
         if message.text == "📊 Статистика":
             cursor.execute("SELECT COUNT(*) FROM subscriptions")
             total = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE end_date > ?", (datetime.now().isoformat(),))
             active = cursor.fetchone()[0]
             await message.answer(f"Всего пользователей: {total}\nАктивных подписок: {active}", reply_markup=kb)
+
         elif message.text == "📢 Рассылка":
-            await message.answer("Отправь сообщение для рассылки (оно будет разослано всем с активной подпиской).", reply_markup=kb)
+            await message.answer("Отправь текст, который будет отправлен всем с активной подпиской.", reply_markup=kb)
+
         elif message.text == "➕ Выдать подписку":
-            await message.answer("Введите username пользователя (начинается с @) и количество дней подписки через пробел.\nПример:\n@username 30", reply_markup=kb)
+            await message.answer("Введите в формате:\n@username 30", reply_markup=kb)
+
         elif message.text.startswith("@"):
             try:
                 parts = message.text.strip().split()
                 if len(parts) != 2:
-                    await message.answer("Ошибка! Введите в формате: @username количество_дней", reply_markup=kb)
+                    await message.answer("Формат: @username 30", reply_markup=kb)
                     return
                 username = parts[0]
                 days = int(parts[1])
-
-                # Найдём user_id по username
                 cursor.execute("SELECT user_id FROM subscriptions WHERE username = ?", (username,))
-                res = cursor.fetchone()
-                if not res:
+                result = cursor.fetchone()
+                if not result:
                     await message.answer(f"Пользователь {username} не найден.", reply_markup=kb)
                     return
-
-                user_id_to_sub = res[0]
+                uid = result[0]
                 end_date = datetime.now() + timedelta(days=days)
                 cursor.execute("REPLACE INTO subscriptions (user_id, username, end_date) VALUES (?, ?, ?)",
-                               (user_id_to_sub, username, end_date.isoformat()))
+                               (uid, username, end_date.isoformat()))
                 conn.commit()
-                await message.answer(f"Подписка выдана пользователю {username} на {days} дней.", reply_markup=kb)
+                await message.answer(f"✅ Подписка выдана пользователю {username} на {days} дней.", reply_markup=kb)
                 try:
-                    await bot.send_message(user_id_to_sub, f"Ваша подписка активирована на {days} дней. Добро пожаловать!")
+                    await bot.send_message(uid, f"Ваша подписка активирована на {days} дней!")
                 except:
                     pass
             except Exception as e:
                 await message.answer(f"Ошибка: {e}", reply_markup=kb)
+
         else:
-            # Это, скорее всего, текст для рассылки
-            text = message.text.strip()
+            # Рассылка
             cursor.execute("SELECT user_id, end_date FROM subscriptions")
-            users = cursor.fetchall()
+            all_users = cursor.fetchall()
             count = 0
-            for uid, end_date in users:
-                if datetime.now() < datetime.fromisoformat(end_date):
+            for uid, end in all_users:
+                if datetime.now() < datetime.fromisoformat(end):
                     try:
-                        await bot.send_message(uid, text)
+                        await bot.send_message(uid, message.text)
                         count += 1
                     except:
                         pass
             await message.answer(f"Сообщение отправлено {count} пользователям.", reply_markup=kb)
 
     else:
-        # Для обычных пользователей
+        # Меню пользователя
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton("⏳ Подписка"))
+
         if message.text == "/start":
             if is_subscribed(user_id):
-                await message.answer("Добро пожаловать! У вас активна подписка ✅")
+                await message.answer("✅ У вас активна подписка.", reply_markup=kb)
             else:
-                await message.answer("Привет! Подписка не активна. Свяжитесь с @intonusmd для оплаты.")
+                await message.answer("🔒 У вас нет активной подписки. Свяжитесь с @вашникнейм.", reply_markup=kb)
+
+        elif message.text == "⏳ Подписка":
+            if is_subscribed(user_id):
+                days = get_remaining_days(user_id)
+                await message.answer(f"📅 Осталось {days} дней подписки.", reply_markup=kb)
+            else:
+                await message.answer("🔒 Подписка не активна. Свяжитесь с @вашникнейм.", reply_markup=kb)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
