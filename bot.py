@@ -2,17 +2,17 @@ import logging
 import sqlite3
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 
-API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"  # Твой токен
-ADMIN_ID = 1303484682  # Твой админ ID
+API_TOKEN = "7641718670:AAHSV9B00v4vx3FGaiC01BvdfPyHyPm0YX0"
+ADMIN_ID = 1303484682
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Подключение к базе данных
+# SQLite база данных
 conn = sqlite3.connect("subscriptions.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 """)
 conn.commit()
 
-# Состояние админов (для пошаговой выдачи подписки)
-admin_states = {}  # user_id -> {"step": ..., "data": {...}}
+# Переменные состояния
+admin_state = {}
 
 # Проверка подписки
 def is_subscribed(user_id):
@@ -35,7 +35,7 @@ def is_subscribed(user_id):
     end_date = datetime.fromisoformat(result[0])
     return datetime.now() < end_date
 
-# Очистка просроченных подписок
+# Удаление просроченных подписок
 async def clean_expired():
     while True:
         now = datetime.now().isoformat()
@@ -43,13 +43,13 @@ async def clean_expired():
         conn.commit()
         await asyncio.sleep(3600)
 
-# Команда /start
+# /start
 @dp.message_handler(commands=["start"])
 async def start_cmd(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(KeyboardButton("📊 Статистика"), KeyboardButton("📢 Рассылка"))
-        kb.add(KeyboardButton("➕ Выдать подписку"))
+        kb.add(KeyboardButton("✅ Выдать подписку"))
         await message.answer("Добро пожаловать в админ-панель!", reply_markup=kb)
     else:
         if is_subscribed(message.from_user.id):
@@ -57,55 +57,53 @@ async def start_cmd(message: types.Message):
         else:
             await message.answer("Привет! Подписка не активна. Свяжитесь с @intonusmd для оплаты.")
 
-# Обработка кнопки "Выдать подписку"
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "➕ Выдать подписку")
-async def issue_subscription_start(message: types.Message):
-    admin_states[message.from_user.id] = {"step": "await_user_id", "data": {}}
-    await message.answer("Введите ID пользователя, которому хотите выдать подписку:")
+# Выдача подписки по кнопке
+@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "✅ Выдать подписку")
+async def issue_subscription(message: types.Message):
+    admin_state[message.from_user.id] = "awaiting_user_id"
+    await message.answer("Введите ID пользователя, которому нужно выдать подписку:")
 
-# Обработка шагов выдачи подписки
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.from_user.id in admin_states)
-async def process_admin_steps(message: types.Message):
-    state = admin_states.get(message.from_user.id)
+@dp.message_handler(lambda message: admin_state.get(message.from_user.id) == "awaiting_user_id")
+async def get_user_id(message: types.Message):
+    try:
+        user_id = int(message.text.strip())
+        admin_state[message.from_user.id] = ("awaiting_days", user_id)
+        await message.answer("Введите количество дней подписки:")
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректный числовой ID пользователя.")
 
-    if state["step"] == "await_user_id":
-        try:
-            user_id = int(message.text.strip())
-            state["data"]["user_id"] = user_id
-            state["step"] = "await_days"
-            await message.answer("Введите количество дней подписки:")
-        except:
-            await message.answer("ID должен быть числом. Попробуйте снова.")
+@dp.message_handler(lambda message: isinstance(admin_state.get(message.from_user.id), tuple) and admin_state[message.from_user.id][0] == "awaiting_days")
+async def get_subscription_days(message: types.Message):
+    try:
+        days = int(message.text.strip())
+        user_id = admin_state[message.from_user.id][1]
+        end_date = datetime.now() + timedelta(days=days)
+        cursor.execute("REPLACE INTO subscriptions (user_id, end_date) VALUES (?, ?)", (user_id, end_date.isoformat()))
+        conn.commit()
+        await message.answer(f"Подписка пользователю {user_id} выдана на {days} дней ✅", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
+            KeyboardButton("📊 Статистика"), KeyboardButton("📢 Рассылка"), KeyboardButton("✅ Выдать подписку")
+        ))
+        await bot.send_message(user_id, f"Ваша подписка активирована на {days} дней ✅")
+        admin_state.pop(message.from_user.id, None)
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число дней.")
 
-    elif state["step"] == "await_days":
-        try:
-            days = int(message.text.strip())
-            user_id = state["data"]["user_id"]
-            end_date = datetime.now() + timedelta(days=days)
-            cursor.execute("REPLACE INTO subscriptions (user_id, end_date) VALUES (?, ?)", (user_id, end_date.isoformat()))
-            conn.commit()
-            del admin_states[message.from_user.id]
-            await message.answer(f"Подписка пользователю {user_id} выдана на {days} дней.")
-            await bot.send_message(user_id, "Ваша подписка активирована. Добро пожаловать!")
-        except:
-            await message.answer("Количество дней должно быть числом. Попробуйте снова.")
-
-# Обработка кнопки "Статистика"
+# Статистика
 @dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📊 Статистика")
 async def stats(message: types.Message):
     cursor.execute("SELECT COUNT(*) FROM subscriptions")
     total = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE end_date > ?", (datetime.now().isoformat(),))
     active = cursor.fetchone()[0]
-    await message.answer(f"Всего пользователей: {total}\nАктивных подписок: {active}")
+    await message.answer(f"Всего пользователей в БД: {total}\nАктивных подписок: {active}")
 
-# Обработка кнопки "Рассылка"
+# Рассылка
 @dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and message.text == "📢 Рассылка")
 async def prompt_broadcast(message: types.Message):
-    await message.answer("Отправь сообщение для рассылки (оно будет разослано всем с активной подпиской).")
+    admin_state[message.from_user.id] = "awaiting_broadcast"
+    await message.answer("Введите текст сообщения для рассылки:")
 
-# Обработка текста для рассылки
-@dp.message_handler(lambda message: message.from_user.id == ADMIN_ID and not message.text.startswith("/") and message.from_user.id not in admin_states)
+@dp.message_handler(lambda message: admin_state.get(message.from_user.id) == "awaiting_broadcast")
 async def handle_broadcast_text(message: types.Message):
     text = message.text.strip()
     cursor.execute("SELECT user_id, end_date FROM subscriptions")
@@ -118,9 +116,9 @@ async def handle_broadcast_text(message: types.Message):
                 count += 1
             except:
                 pass
-    await message.answer(f"Сообщение отправлено {count} пользователям.")
+    await message.answer(f"Сообщение отправлено {count} пользователям ✅")
+    admin_state.pop(message.from_user.id, None)
 
-# Запуск
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.get_event_loop()
