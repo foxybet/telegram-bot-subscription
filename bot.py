@@ -12,7 +12,6 @@ ADMIN_ID = 1303484682
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Подключаем SQLite для хранения подписок
 conn = sqlite3.connect("subscriptions.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -35,13 +34,17 @@ def add_user(user: types.User):
         )
         conn.commit()
 
-def is_subscribed(user_id):
+def get_subscription_remaining_days(user_id):
     cursor.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,))
     result = cursor.fetchone()
     if not result:
-        return False
+        return 0
     end_date = datetime.fromisoformat(result[0])
-    return datetime.now() < end_date
+    remaining = (end_date - datetime.now()).days
+    return remaining if remaining > 0 else 0
+
+def is_subscribed(user_id):
+    return get_subscription_remaining_days(user_id) > 0
 
 async def clean_expired():
     while True:
@@ -55,10 +58,15 @@ async def handle_all_messages(message: types.Message):
     add_user(message.from_user)
 
     user_id = message.from_user.id
+
     kb_admin = ReplyKeyboardMarkup(resize_keyboard=True).add(
         KeyboardButton("📊 Статистика"),
         KeyboardButton("📢 Рассылка"),
         KeyboardButton("➕ Выдать подписку")
+    )
+
+    kb_user = ReplyKeyboardMarkup(resize_keyboard=True).add(
+        KeyboardButton("🔍 Проверить подписку")
     )
 
     if user_id == ADMIN_ID:
@@ -123,7 +131,7 @@ async def handle_all_messages(message: types.Message):
         # Пользовательская часть
         if message.text == "/start":
             if is_subscribed(user_id):
-                await message.answer("👋 Добро пожаловать обратно!\nУ вас активна подписка ✅")
+                await message.answer("👋 Добро пожаловать обратно!\nУ вас активна подписка ✅", reply_markup=kb_user)
             else:
                 welcome_message = (
                     "👋 *Добро пожаловать!*\n\n"
@@ -137,7 +145,14 @@ async def handle_all_messages(message: types.Message):
                     "🔒 У вас пока нет активной подписки.\n"
                     "Для активации — свяжитесь с администратором 👉 @intonusmd"
                 )
-                await message.answer(welcome_message, parse_mode="Markdown")
+                await message.answer(welcome_message, parse_mode="Markdown", reply_markup=kb_user)
+
+        elif message.text == "🔍 Проверить подписку":
+            days_left = get_subscription_remaining_days(user_id)
+            if days_left > 0:
+                await message.answer(f"⏳ Ваша подписка активна ещё {days_left} дней.", reply_markup=kb_user)
+            else:
+                await message.answer("🔒 У вас нет активной подписки.", reply_markup=kb_user)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
